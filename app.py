@@ -94,10 +94,16 @@ if worker_id:
             r3 = col_r3.radio("Specificity", RATING_OPTIONS, horizontal=True, key=f"s_{idx}",
                                help="Is each step sufficiently concrete about what to retrieve?")
         else:  # sufficiency
+            # 2026-09-14: recent_reasoning is multi-paragraph -- Markdown's
+            # "> " blockquote syntax only wraps the FIRST paragraph (it
+            # breaks at the first blank line), so the rest silently fell
+            # back to plain unquoted text, visually splitting one field
+            # into two different styles. st.info's box doesn't have that
+            # problem, so it's used here too instead of "> " prefixing.
             st.markdown(f"**Question:**\n> {row['question']}")
-            st.markdown(f"**Prior reasoning:**\n> {row['recent_reasoning']}")
+            st.info(f"**Prior reasoning:**\n\n{row['recent_reasoning']}")
             st.markdown(f"**Search query:**\n> {row['search_query']}")
-            st.info(f"**Retrieved information:**\n{row['extracted_info']}")
+            st.info(f"**Retrieved information:**\n\n{row['extracted_info']}")
 
             st.divider()
             r1 = st.radio(
