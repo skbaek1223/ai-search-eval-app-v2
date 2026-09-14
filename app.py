@@ -10,6 +10,11 @@ SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
 ]
 
+CSV_BY_TASK = {"plan": "plan_task_v3.csv", "sufficiency": "sufficiency_task.csv"}
+RATING_OPTIONS = ["fail", "borderline", "pass"]
+SUFFICIENCY_OPTIONS = ["insufficient", "borderline", "sufficient"]
+
+
 @st.cache_resource
 def get_worksheet():
     creds = Credentials.from_service_account_info(
@@ -20,42 +25,43 @@ def get_worksheet():
     worksheet = sheet.sheet1
     if worksheet.row_count == 0 or not worksheet.get_all_values():
         worksheet.append_row(
-            ["timestamp", "worker_id", "part", "item_id", "grounded", "coverage", "specificity", "notes"]
+            ["timestamp", "worker_id", "task", "part", "item_id",
+             "rating_1", "rating_2", "rating_3", "notes"]
         )
     return worksheet
 
-def save_response(worker_id, part, item_id, grounded, coverage, specificity, notes):
+
+def save_response(worker_id, task, part, item_id, r1, r2, r3, notes):
     worksheet = get_worksheet()
     worksheet.append_row(
-        [
-            datetime.now(timezone.utc).isoformat(),
-            worker_id,
-            part,
-            item_id,
-            grounded,
-            coverage,
-            specificity,
-            notes,
-        ]
+        [datetime.now(timezone.utc).isoformat(), worker_id, task, part,
+         item_id, r1, r2, r3, notes]
     )
 
-# URL 파라미터에서 part 추출 (예: ?part=1 또는 ?part=2)
+
 query_params = st.query_params
-part = query_params.get("part", "1")  # 기본값 1
+task = query_params.get("task", "plan")
+part = query_params.get("part", "1")
 
+# 2026-09-14: plain disjoint split (no shared/overlap items) -- matches
+# the HARIS paper's (arXiv:2506.07528) own human-validation design: two
+# annotators each independently rate their own disjoint half (75/75 for
+# 150 items there, same pattern here), and the reliability number reported
+# (Cohen's kappa, agreement %) is HUMAN-vs-LLM-JUDGE agreement per item,
+# not human-vs-human -- which needs no overlap at all, since every item
+# already has both a human rating (from whichever annotator got it) and
+# an LLM-judge verdict to compare against.
 @st.cache_data
-def load_data(part_num):
-    df = pd.read_csv("planner_task_upload_v3.csv")
-    if part_num == "2":
-        return df.iloc[75:].reset_index(drop=True)
-    else:
-        return df.iloc[:75].reset_index(drop=True)
+def load_data(task, part_num):
+    df = pd.read_csv(CSV_BY_TASK[task])
+    half = len(df) // 2
+    return (df.iloc[half:] if part_num == "2" else df.iloc[:half]).reset_index(drop=True)
 
-df = load_data(part)
 
-st.title(f"AI-Generated Search Plans Evaluation (Part {part})")
+df = load_data(task, part)
 
-# 세션 상태로 현재 인덱스 관리
+st.title(f"AI Search Eval -- {task} task (Part {part})")
+
 if 'current_idx' not in st.session_state:
     st.session_state.current_idx = 0
 
@@ -63,39 +69,52 @@ worker_id = st.text_input("Enter your Prolific/Connect ID:")
 
 if worker_id:
     idx = st.session_state.current_idx
-    
+
     if idx < len(df):
         row = df.iloc[idx]
-        
+
         st.progress((idx + 1) / len(df))
         st.subheader(f"Item {idx + 1} of {len(df)}: {row['item_id']}")
-        
-        col1, col2 = st.columns([1, 1])
-        with col1:
+
+        if task == "plan":
+            col1, col2 = st.columns([1, 1])
+            with col1:
+                st.markdown(f"**Question:**\n> {row['question']}")
+                st.markdown(f"**Search Plan:**\n```text\n{row['search_plan']}\n```")
+            with col2:
+                st.markdown(f"**Gold Answer:**\n{row['correct_answer']}")
+                st.info(f"**Reference Passages:**\n{row['reference_passages']}")
+
+            st.divider()
+            col_r1, col_r2, col_r3 = st.columns(3)
+            r1 = col_r1.radio("Grounded", RATING_OPTIONS, horizontal=True, key=f"g_{idx}",
+                               help="Are the facts in the plan actually implied by the question, with nothing invented?")
+            r2 = col_r2.radio("Coverage", RATING_OPTIONS, horizontal=True, key=f"c_{idx}",
+                               help="Does the plan include every step needed to reach the answer?")
+            r3 = col_r3.radio("Specificity", RATING_OPTIONS, horizontal=True, key=f"s_{idx}",
+                               help="Is each step sufficiently concrete about what to retrieve?")
+        else:  # sufficiency
             st.markdown(f"**Question:**\n> {row['question']}")
-            st.markdown(f"**Search Plan:**\n```text\n{row['search_plan']}\n```")
-        with col2:
-            st.markdown(f"**Gold Answer:**\n{row['correct_answer']}")
-            st.info(f"**Reference Passages:**\n{row['reference_passages']}")
-            
-        st.divider()
-        
-        RATING_OPTIONS = ["fail", "borderline", "pass"]
-        col_r1, col_r2, col_r3 = st.columns(3)
-        grounded = col_r1.radio("Grounded", RATING_OPTIONS, horizontal=True, key=f"g_{idx}",
-                                 help="Are the facts in the plan actually implied by the question, with nothing invented?")
-        coverage = col_r2.radio("Coverage", RATING_OPTIONS, horizontal=True, key=f"c_{idx}",
-                                 help="Does the plan include every step needed to reach the answer?")
-        specificity = col_r3.radio("Specificity", RATING_OPTIONS, horizontal=True, key=f"s_{idx}",
-                                    help="Is each step sufficiently concrete about what to retrieve?")
+            st.markdown(f"**Prior reasoning:**\n> {row['recent_reasoning']}")
+            st.markdown(f"**Search query:**\n> {row['search_query']}")
+            st.info(f"**Retrieved information:**\n{row['extracted_info']}")
+
+            st.divider()
+            r1 = st.radio(
+                "Is the retrieved information SUFFICIENT to answer the question "
+                "(given the prior reasoning so far)?",
+                SUFFICIENCY_OPTIONS, horizontal=True, key=f"suff_{idx}",
+            )
+            r2, r3 = "", ""
+
         notes = st.text_input("Notes (Optional)", key=f"n_{idx}")
-        
+
         if st.button("Submit & Next"):
-            save_response(worker_id, part, row['item_id'], grounded, coverage, specificity, notes)
+            save_response(worker_id, task, part, row['item_id'], r1, r2, r3, notes)
             st.session_state.current_idx += 1
             st.rerun()
     else:
         st.balloons()
-        st.success("🎉 You have completed all 75 items! Thank you.")
+        st.success(f"🎉 You have completed all {len(df)} items! Thank you.")
 else:
     st.warning("Please enter your Connect ID to start.")
